@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 //! Library to parse google location history data
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, FixedOffset};
 use serde_derive::{Deserialize, Serialize};
 
 /// group of locations
@@ -13,7 +13,7 @@ pub trait LocationsExt {
     fn average_time(&self) -> i64;
 
     /// find the closest Location to a datetime
-    fn find_closest(&self, time: NaiveDateTime) -> Option<Location>;
+    fn find_closest(&self, time: DateTime<FixedOffset>) -> Option<Location>;
 
     /// remove locations that are offset more than 300km/h from last location
     fn filter_outliers(self) -> Locations;
@@ -28,7 +28,7 @@ impl LocationsExt for Locations {
         time / (self.len() as i64)
     }
 
-    fn find_closest(&self, time: NaiveDateTime) -> Option<Location> {
+    fn find_closest(&self, time: DateTime<FixedOffset>) -> Option<Location> {
         let result = self.binary_search_by(|x| x.timestamp.cmp(&time));
         let index = match result {
             Ok(x) => Some(x),
@@ -79,9 +79,9 @@ pub fn deserialize(from: &str) -> Locations {
 #[derive(Serialize, Deserialize, Copy, Clone, Debug)]
 /// Location sample parsed from LocationHistory.json
 pub struct Location {
-    #[serde(rename = "timestampMs", deserialize_with = "parse_date")]
-    /// timestamp this location was sampled at, converted from milliseconds
-    pub timestamp: NaiveDateTime,
+    #[serde(rename = "timestamp", deserialize_with = "parse_timestamp")]
+    /// timestamp this location was sampled at
+    pub timestamp: DateTime<FixedOffset>,
     #[serde(rename = "latitudeE7", deserialize_with = "parse_location")]
     /// latitude, converted from lat E7
     pub latitude: f32,
@@ -89,7 +89,7 @@ pub struct Location {
     /// longitude, converted from long E7
     pub longitude: f32,
     /// accuracy of location sample in meters
-    pub accuracy: i32,
+    pub accuracy: Option<i32>,
     /// altitude in meters, if available
     pub altitude: Option<i32>,
 }
@@ -121,16 +121,18 @@ impl Location {
     }
 }
 
-fn parse_date<'de, D>(de: D) -> Result<NaiveDateTime, D::Error>
+fn parse_timestamp<'de, D>(de: D) -> Result<DateTime<FixedOffset>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    // Expects the new Records.json timestamp format, e.g:
+    //     "timestamp": "2016-08-07T04:54:00.678Z"
     let deser_result: serde_json::Value = serde::Deserialize::deserialize(de)?;
+
     match deser_result {
-        serde_json::Value::String(ref s) => Ok(NaiveDateTime::from_timestamp(
-            s.parse::<i64>().unwrap() / 1000,
-            0,
-        )),
+        serde_json::Value::String(ref s) => Ok(DateTime::parse_from_rfc3339(
+            s
+        ).unwrap()),
         _ => Err(serde::de::Error::custom("Unexpected value")),
     }
 }
