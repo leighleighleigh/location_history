@@ -1,6 +1,13 @@
 # Use Google location history files in rust
+## Preface
 
-## Getting started
+This is a personal fork, modified to work with the latest location history format.
+
+Overall the crate isn't too complicated - `serde_json` does all the heavy lifting.
+
+I'm experimenting with channel-based 'streaming deserialization', and parsing of the `activity` field for filtering by vehicle,walking,running, etc.
+
+## Getting started (original)
 
 ```rust
 extern crate location_history;
