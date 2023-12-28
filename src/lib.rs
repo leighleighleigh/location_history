@@ -4,6 +4,10 @@
 use chrono::{DateTime, FixedOffset};
 use serde_derive::{Deserialize, Serialize};
 
+extern crate prettytable;
+use prettytable::row;
+use colored::Colorize;
+
 extern crate struson;
 use struson::reader::{JsonStreamReader,JsonReader};
 use struson::json_path;
@@ -239,6 +243,68 @@ where
         _ => Err(serde::de::Error::custom("Unexpected value")),
     }
 }
+
+
+// impliment nicer-looking Display traits for Location, Locations, Activity, and Activities
+impl std::fmt::Display for Location {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // show all fields of Location in a condensed manner, using prettytable
+        let mut table = prettytable::Table::new();
+
+        // show the data in a key : value format, with the key in bold
+        table.add_row(row!["timestamp".bold(), self.timestamp]);
+        table.add_row(row!["latitude".bold(), self.latitude]);
+        table.add_row(row!["longitude".bold(), self.longitude]);
+
+        // map accuracy to ??? if unknown
+        let accuracy_str = match self.accuracy {
+            Some(accuracy) => accuracy.to_string(),
+            None => "???".to_string(),
+        };
+        table.add_row(row!["accuracy".bold(), accuracy_str]);
+
+        // map altitude to ??? if unknown
+        let altitude_str = match self.altitude {
+            Some(altitude) => altitude.to_string(),
+            None => "???".to_string(),
+        };
+        table.add_row(row!["altitude".bold(), altitude_str]);
+
+        // map the activities to a string
+        let activity_str = match &self.activities {
+            Some(activities) => {
+                // sort by timestamp
+                let mut activities = activities.clone();
+                activities.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                // join each activity vec by newline, and each activity by a comma
+                activities.iter().map(|x| x.to_string()).collect::<Vec<String>>().join("\n")
+            }
+            None => "None".to_string(),
+        };
+        table.add_row(row!["activities".bold(), activity_str]);
+
+        // write the table to the formatter
+        table.fmt(f)
+    }
+}
+
+impl std::fmt::Display for Activity {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:<16}({:>3}%)", self.activity_type, self.confidence)
+    }
+}
+
+impl std::fmt::Display for Activities {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}\n", self.timestamp)?;
+
+        for act in self.activities.iter() {
+            write!(f, "{}\n", act)?;
+        }
+        Ok(())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
