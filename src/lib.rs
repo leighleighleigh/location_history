@@ -8,6 +8,7 @@ extern crate struson;
 use struson::reader::{JsonStreamReader,JsonReader};
 use struson::json_path;
 use std::io::BufReader;
+use std::sync::mpsc::Sender;
 use std::fs::File;
 use std::path::PathBuf;
 
@@ -22,8 +23,14 @@ pub trait LocationsExt {
     /// find the closest Location to a datetime
     fn find_closest(&self, time: DateTime<FixedOffset>) -> Option<Location>;
 
+    /// sort locations by timestamp
+    fn sort_chronological(&mut self);
+
     /// remove locations that are offset more than 300km/h from last location
     fn filter_outliers(self) -> Locations;
+
+    // filter by activity, where the highest-confidence activity is the one that is passed as argument
+    fn filter_by_activity(self, activity: String) -> Locations;
 }
 
 impl LocationsExt for Locations {
@@ -51,19 +58,42 @@ impl LocationsExt for Locations {
 
         if let Some(x) = index {
             if x < self.len() {
-                return Some(self[x]);
+                return Some(self[x].clone());
             }
         }
         None
     }
 
+    fn sort_chronological(&mut self) {
+        self.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    }
+
     fn filter_outliers(self) -> Locations {
-        let mut tmp: Vec<Location> = vec![self[0]];
+        let mut tmp: Vec<Location> = vec![self[0].clone()];
         for location in self.into_iter() {
             if location.speed_kmh(&tmp[tmp.len() - 1]) < 300.0 {
                 tmp.push(location);
             }
         }
+        tmp.sort_chronological();
+        tmp
+    }
+
+    fn filter_by_activity(self, activity_type: String) -> Locations {
+        let mut tmp: Vec<Location> = Vec::new();
+
+        for location in self.into_iter() {
+            if let Some(activities) = &location.activities {
+                for activity in activities.into_iter() {
+                    if let Some(activity) = activity.activities.iter().max_by_key(|x| x.confidence) {
+                        if activity.activity_type == activity_type {
+                            tmp.push(location.clone());
+                        }
+                    }
+                }
+            }
+        }
+        tmp.sort_chronological();
         tmp
     }
 }
@@ -83,7 +113,22 @@ pub fn deserialize(from: &str) -> Locations {
     deserialized.locations
 }
 
-pub fn deserialize_streaming(from: PathBuf, handler: fn(Location) -> ()) -> Locations {
+
+/// Reads a `Records.json` file and decodes the data on-the-fly.
+/// The file is expected to contain a single large array of `Location` objects
+/// under a 'locations' key.
+///
+/// This function sends each decoded `Location` object to the provided
+/// MPSC channel as soon as it is decoded.
+///
+/// It is recommended to call this function from a separate thread, as it will
+/// block until the entire file has been read.
+///
+/// # Arguments
+///
+/// * `from` - The path to the `Records.json` file.
+/// * `tx` - The `Sender` channel to send the decoded `Location` objects.
+pub fn deserialize_streaming(from: PathBuf, tx: Sender<Location>) {
     let file = File::open::<PathBuf>(from).unwrap();
     let reader = BufReader::new(file);
 
@@ -93,29 +138,37 @@ pub fn deserialize_streaming(from: PathBuf, handler: fn(Location) -> ()) -> Loca
 
     json_reader.begin_array().unwrap();
 
-    let mut locations : Vec<Location> = Vec::new();
-
     while json_reader.has_next().unwrap() {
         let location: Location = json_reader.deserialize_next().unwrap();
-        locations.push(location);
-
-        // send to the handler
-        handler(location);
+        tx.send(location).unwrap();
     }
-
 
     // Optionally consume the remainder of the JSON document
     json_reader.end_array().unwrap();
-    json_reader.consume_trailing_whitespace().unwrap();
-
-    locations.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-    locations
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Activity {
+    #[serde(rename = "type")]
+    pub activity_type : String,
+    pub confidence : i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Activities {
+    #[serde(deserialize_with = "parse_timestamp")]
+    /// timestamp this location was sampled at
+    pub timestamp: DateTime<FixedOffset>,
+    
+    /// activities list
+    #[serde(rename = "activity")]
+    pub activities: Vec<Activity>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 /// Location sample parsed from LocationHistory.json
 pub struct Location {
-    #[serde(rename = "timestamp", deserialize_with = "parse_timestamp")]
+    #[serde(deserialize_with = "parse_timestamp")]
     /// timestamp this location was sampled at
     pub timestamp: DateTime<FixedOffset>,
     #[serde(rename = "latitudeE7", deserialize_with = "parse_location")]
@@ -128,6 +181,9 @@ pub struct Location {
     pub accuracy: Option<i32>,
     /// altitude in meters, if available
     pub altitude: Option<i32>,
+    
+    #[serde(rename = "activity")]
+    pub activities: Option<Vec<Activities>>,
 }
 
 impl Location {
@@ -191,18 +247,18 @@ mod tests {
         use crate::LocationsExt;
 
         let test_data = r#"{"locations" : [ {
-                            "timestampMs" : "1491801919709",
+                            "timestamp" : "2016-08-07T04:54:00.678Z",
                             "latitudeE7" : 500373489,
                             "longitudeE7" : 83320934,
                             "accuracy" : 19,
                             "activitys" : [ {
-                                "timestampMs" : "1491802042056",
+                                "timestamp" : "2016-08-07T04:54:00.678Z",
                                 "activities" : [ {
                                     "type" : "still",
                                     "confidence" : 100
                                 } ]
                                 }, {
-                                "timestampMs" : "1491801923049",
+                                "timestamp" : "2016-08-07T04:54:00.678Z",
                                 "activities" : [ {
                                 "type" : "still",
                                 "confidence" : 100
