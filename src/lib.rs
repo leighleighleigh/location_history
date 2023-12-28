@@ -41,7 +41,7 @@ impl LocationsExt for Locations {
     fn average_time(&self) -> i64 {
         let mut time = 0;
         for i in 1..self.len() {
-            time += self[i - 1].timestamp.timestamp() - self[i].timestamp.timestamp()
+            time += self[i].timestamp.timestamp() - self[i-1].timestamp.timestamp()
         }
         time / (self.len() as i64)
     }
@@ -74,11 +74,17 @@ impl LocationsExt for Locations {
 
     fn filter_outliers(self) -> Locations {
         let mut tmp: Vec<Location> = vec![self[0].clone()];
+
         for location in self.into_iter() {
-            if location.speed_kmh(&tmp[tmp.len() - 1]) < 300.0 {
+            if let Some(speed) = location.speed_kmh(&tmp[tmp.len() - 1]) {
+                if speed < 300.0 {
+                    tmp.push(location);
+                }
+            } else {
                 tmp.push(location);
             }
         }
+
         tmp.sort_chronological();
         tmp
     }
@@ -94,7 +100,6 @@ impl LocationsExt for Locations {
                     if let Some(activity) = activity.activities.iter().max_by_key(|x| x.confidence) {
                         if activity.activity_type == activity_type {
                             tmp.push(location.clone());
-                            // we only want to add each location once
                             break;
                         }
                     }
@@ -148,11 +153,11 @@ pub fn deserialize_streaming(from: PathBuf, tx: Sender<Location>) {
 
     while json_reader.has_next().unwrap() {
         let location: Location = json_reader.deserialize_next().unwrap();
-        tx.send(location).unwrap();
+        match tx.send(location) {
+            Ok(_) => {}
+            Err(_) => break,
+        }
     }
-
-    // Optionally consume the remainder of the JSON document
-    json_reader.end_array().unwrap();
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -209,14 +214,17 @@ impl Location {
     }
 
     /// calculate the speed in km/h from this location to another location
-    pub fn speed_kmh(&self, other: &Location) -> f32 {
+    /// if a maximum time delta is exceeded, None is returned
+    pub fn speed_kmh(&self, other: &Location) -> Option<f32> {
         let dist = self.haversine_distance(other);
         let time = self.timestamp.timestamp() - other.timestamp.timestamp();
-        if time > 0 {
+
+        // 10 minute gap
+        if time > 0 && time < 600 {
             let meter_second = dist / time as f32;
-            meter_second * 3.6
+            Some(meter_second * 3.6)
         } else {
-            dist / 1000.0
+            None
         }
     }
 }
