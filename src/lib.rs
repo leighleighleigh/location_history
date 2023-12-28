@@ -12,9 +12,12 @@ extern crate struson;
 use struson::reader::{JsonStreamReader,JsonReader};
 use struson::json_path;
 use std::io::BufReader;
+use std::str::Lines;
 use std::sync::mpsc::Sender;
 use std::fs::File;
 use std::path::PathBuf;
+
+use geo::{Point,LineString,HaversineDistance, Coord};
 
 /// group of locations
 pub type Locations = Vec<Location>;
@@ -200,17 +203,12 @@ pub struct Location {
 }
 
 impl Location {
-    /// calculate the haversine distance between this and another location
+    /// calculate the haversine distance between this and another location.
+    /// now uses the geo crate!
     pub fn haversine_distance(&self, other: &Location) -> f32 {
-        let long1 = self.longitude.to_radians();
-        let long2 = other.longitude.to_radians();
-        let lat1 = self.latitude.to_radians();
-        let lat2 = other.latitude.to_radians();
-        let dlon = long2 - long1;
-        let dlat = lat2 - lat1;
-        let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-        let c = 2.0 * a.sqrt().asin();
-        c * 6_371_000.0
+        let p1: Point<f32> = self.into();
+        let p2: Point<f32> = other.into();
+        p1.haversine_distance(&p2)
     }
 
     /// calculate the speed in km/h from this location to another location
@@ -256,6 +254,19 @@ where
     }
 }
 
+// convert location into a Point
+impl Into<Point<f32>> for &Location {
+    fn into(self) -> Point<f32> {
+        let c : Coord<f32> = self.into();
+        Point::from(c)
+    }
+}
+
+impl Into<Coord<f32>> for &Location {
+    fn into(self) -> Coord<f32> {
+        Coord{ x: self.longitude as f32, y: self.latitude as f32 }
+    }
+}
 
 // impliment nicer-looking Display traits for Location, Locations, Activity, and Activities
 impl std::fmt::Display for Location {
@@ -265,8 +276,13 @@ impl std::fmt::Display for Location {
 
         // show the data in a key : value format, with the key in bold
         table.add_row(row!["timestamp".bold(), self.timestamp]);
-        table.add_row(row!["latitude".bold(), self.latitude]);
-        table.add_row(row!["longitude".bold(), self.longitude]);
+
+        // old - show lat/long separately
+        // table.add_row(row!["latitude".bold(), self.latitude]);
+        // table.add_row(row!["longitude".bold(), self.longitude]);
+        // new - show as Point
+        let pt : Point<f32> = self.into();
+        table.add_row(row!["location".bold(), format!("{:#?}", pt.0)]);
 
         // map accuracy to ??? if unknown
         let accuracy_str = match self.accuracy {
