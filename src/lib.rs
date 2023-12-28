@@ -87,11 +87,15 @@ impl LocationsExt for Locations {
         let mut tmp: Vec<Location> = Vec::new();
 
         for location in self.into_iter() {
+            // iterate through all activities recorded at this location
             if let Some(activities) = &location.activities {
                 for activity in activities.into_iter() {
+                    // check if the highest-confidence activity is the one we want
                     if let Some(activity) = activity.activities.iter().max_by_key(|x| x.confidence) {
                         if activity.activity_type == activity_type {
                             tmp.push(location.clone());
+                            // we only want to add each location once
+                            break;
                         }
                     }
                 }
