@@ -1,8 +1,15 @@
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 //! Library to parse google location history data
 
 use chrono::{DateTime, FixedOffset};
 use serde_derive::{Deserialize, Serialize};
+
+extern crate struson;
+use struson::reader::{JsonStreamReader,JsonReader};
+use struson::json_path;
+use std::io::BufReader;
+use std::fs::File;
+use std::path::PathBuf;
 
 /// group of locations
 pub type Locations = Vec<Location>;
@@ -74,6 +81,35 @@ pub fn deserialize(from: &str) -> Locations {
         .locations
         .sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     deserialized.locations
+}
+
+pub fn deserialize_streaming(from: PathBuf, handler: fn(Location) -> ()) -> Locations {
+    let file = File::open::<PathBuf>(from).unwrap();
+    let reader = BufReader::new(file);
+
+    let mut json_reader = JsonStreamReader::new(reader);
+
+    json_reader.seek_to(&json_path!["locations"]).unwrap();
+
+    json_reader.begin_array().unwrap();
+
+    let mut locations : Vec<Location> = Vec::new();
+
+    while json_reader.has_next().unwrap() {
+        let location: Location = json_reader.deserialize_next().unwrap();
+        locations.push(location);
+
+        // send to the handler
+        handler(location);
+    }
+
+
+    // Optionally consume the remainder of the JSON document
+    json_reader.end_array().unwrap();
+    json_reader.consume_trailing_whitespace().unwrap();
+
+    locations.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    locations
 }
 
 #[derive(Serialize, Deserialize, Copy, Clone, Debug)]
