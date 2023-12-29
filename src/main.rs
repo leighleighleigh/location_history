@@ -1,8 +1,8 @@
 use itertools::Itertools;
 use anyhow::Result;
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Datelike};
 
-use geo::Coord;
+use geo::{Coord,Point};
 
 use spinner::SpinnerBuilder;
 use std::path::PathBuf;
@@ -38,28 +38,36 @@ struct LoadArgs {
     end_date: Option<String>,
     #[arg(short = 'a')]
     activity_type: Option<String>,
+
+    #[clap(short = 'c', number_of_values = 3, allow_hyphen_values = true)]
+    center_point_radius : Option<Vec<f64>>,
+
     #[arg(short = 'n')]
     record_limit: Option<usize>,
     records_json_path: PathBuf,
 }
 
 // Function to convert latitude and longitude to X/Y/Z on the globe surface
-fn convert_to_xyz(coord : Coord<f32>) -> (f32, f32, f32) {
-    let latitude = coord.x;
-    let longitude = coord.y;
-    // Convert latitude and longitude to radians
-    let lat_rad = latitude.to_radians();
-    let lon_rad = longitude.to_radians();
+fn convert_to_xyz(loc : &Location) -> (f64, f64, f64) {
+    let coord : Coord<f64> = loc.into();
+    let altitude = loc.altitude.unwrap_or(0) as f64;
 
-    // Radius of the Earth in meters
-    let radius = 6371000.0;
+    // convert into cartesian coordinates, using geo
+    let (x,y) = coord.x_y();
+    // flip the latitude/longitude so that they look correct for south hemisphere, with north-up
+    (y,-x,altitude)
 
-    // Calculate Cartesian coordinates on the globe surface
-    let x = radius * lat_rad.cos() * lon_rad.sin();
-    let y = radius * lat_rad.cos() * lon_rad.cos();
-    let z = radius * lat_rad.sin();
 
-    (x, y, z)
+    // // Convert latitude and longitude to radians
+    // let lat_rad = latitude.to_radians();
+    // let lon_rad = longitude.to_radians();
+    // // Radius of the Earth in meters
+    // let radius = 6371000.0;
+    // // Calculate Cartesian coordinates on the globe surface
+    // let x = radius * lat_rad.cos() * lon_rad.sin();
+    // let y = radius * lat_rad.cos() * lon_rad.cos();
+    // let z = radius * lat_rad.sin();
+    // (x, y, z)
 }
 
 fn main() -> Result<()> {
@@ -143,6 +151,15 @@ fn main() -> Result<()> {
     let delta: i64 = (len_before - filtered_locations.len()) as i64;
     info!("Removed {} outliers by velocity", delta);
 
+    if let Some(center_point_radius) = args.center_point_radius {
+        let lat = center_point_radius[0];
+        let long = center_point_radius[1];
+        let radius = center_point_radius[2];
+
+        let origin : Point<f64> = Point::new(lat, long);
+        filtered_locations = filtered_locations.filter_by_distance(origin, radius);
+    }
+
     // print the list of activities
     info!("Activities:");
     let activity_list = filtered_locations.list_activities();
@@ -169,16 +186,10 @@ fn main() -> Result<()> {
         info!("\n{}", loc);
     }
 
-    // make a linestring from the first 10
-    let txy : Vec<(f64,(f32,f32,f32))> = filtered_locations
+    // group lines by day
+    let line_groups : Vec<Vec<Location>> = filtered_locations
         .iter()
-        .map(|loc| (loc.timestamp.timestamp() as f64, convert_to_xyz(loc.into())))
-        .collect();
-
-    // group the points by their timestamp - if they are within 30 minutes of each other, they are in the same group
-    let line_groups : Vec<Vec<(f64,(f32,f32,f32))>> = txy
-        .iter()
-        .group_by(|(t,_)| t.floor() as i64)
+        .group_by(|loc| loc.timestamp.timestamp() / 3600)
         .into_iter()
         .map(|(_,g)| g.cloned().collect())
         .collect();
@@ -187,10 +198,19 @@ fn main() -> Result<()> {
     let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").spawn()?;
 
     for group in line_groups {
-        let time = group[0].0;
-        let coords : Vec<(f32,f32,f32)> = group.iter().map(|(_,c)| *c).collect();
+        let time = group[0].timestamp.timestamp() as f64;
+
+        // vec of x,y,z (lat long  altitude)
+        let coords : Vec<(f64,f64,f64)> = group.iter().map(|loc| convert_to_xyz(loc)).collect();
+        let mut coords_pts : Vec<(f32,f32)> = coords.iter().map(|(x,y,_)| (*x as f32,*y as f32)).collect();
+        // multiply the points by 10 to make them visible
+        coords_pts = coords_pts.iter().map(|(x,y)| (*x * 10.0,*y * 10.0)).collect();
+
+        // make a rerun LineStrips3D object
+        let linestrip = rerun::LineStrips2D::new(vec![coords_pts]);
+
         rec.set_time_seconds("time", time);
-        rec.log("position", &rerun::Points3D::new(coords)).unwrap();
+        rec.log("position", &linestrip).unwrap();
     }
 
     // for (time,coord) in txy {
@@ -199,7 +219,7 @@ fn main() -> Result<()> {
     // }
 
 
-    // let positions: Vec<Coord<f32>> = filtered_locations
+    // let positions: Vec<Coord<f64>> = filtered_locations
     //     .iter()
     //     .map(|loc| loc.into())
     //     .collect();
@@ -207,15 +227,15 @@ fn main() -> Result<()> {
     // // convert the times to unix epoch seconds/milliseconds
     // let times: Vec<i64> = times.iter().map(|dt| dt.timestamp_millis()).collect();
     // // convert the positions to tuples
-    // let xys: Vec<(f32, f32)> = positions.iter().map(|p| (p.x, p.y)).collect();
-    // let xs: Vec<f32> = positions.iter().map(|p| (p.x)).collect();
-    // let ys: Vec<f32> = positions.iter().map(|p| (p.y)).collect();
+    // let xys: Vec<(f64, f64)> = positions.iter().map(|p| (p.x, p.y)).collect();
+    // let xs: Vec<f64> = positions.iter().map(|p| (p.x)).collect();
+    // let ys: Vec<f64> = positions.iter().map(|p| (p.y)).collect();
 
     // // get min/max of x and y
-    // let min_x = xs.clone().into_iter().reduce(f32::min).unwrap_or(0.0);
-    // let max_x = xs.clone().into_iter().reduce(f32::max).unwrap_or(0.0);
-    // let min_y = ys.clone().into_iter().reduce(f32::min).unwrap_or(0.0);
-    // let max_y = ys.clone().into_iter().reduce(f32::max).unwrap_or(0.0);
+    // let min_x = xs.clone().into_iter().reduce(f64::min).unwrap_or(0.0);
+    // let max_x = xs.clone().into_iter().reduce(f64::max).unwrap_or(0.0);
+    // let min_y = ys.clone().into_iter().reduce(f64::min).unwrap_or(0.0);
+    // let max_y = ys.clone().into_iter().reduce(f64::max).unwrap_or(0.0);
     // // use term_size to get the terminal size
     // let (w, h) = term_size::dimensions().unwrap();
     // Chart::new_with_y_range((w*1) as u32, (h*3) as u32, min_x, max_x, min_y, max_y)

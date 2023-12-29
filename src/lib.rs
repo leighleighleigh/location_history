@@ -5,24 +5,24 @@ use chrono::{DateTime, FixedOffset};
 use serde_derive::{Deserialize, Serialize};
 
 extern crate prettytable;
-use prettytable::row;
 use colored::Colorize;
+use prettytable::row;
 
 extern crate struson;
-use struson::reader::{JsonStreamReader,JsonReader};
-use struson::json_path;
 use std::collections::HashSet;
-use std::io::BufReader;
-use std::sync::mpsc::Sender;
 use std::fs::File;
+use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+use struson::json_path;
+use struson::reader::{JsonReader, JsonStreamReader};
 
 use glob_match::glob_match;
 
 #[allow(unused_imports)]
-use log::{debug, error, log_enabled, info, Level};
+use log::{debug, error, info, log_enabled, Level};
 
-use geo::{Point,HaversineDistance,Coord};
+use geo::{Coord, HaversineDistance, Point};
 
 /// group of locations
 pub type Locations = Vec<Location>;
@@ -50,13 +50,16 @@ pub trait LocationsExt {
 
     // retrieves the unique set of activity types in the data
     fn list_activities(&self) -> Vec<String>;
+
+    // filters to points within a distance of a point
+    fn filter_by_distance(self, point: Point<f64>, distance: f64) -> Locations;
 }
 
 impl LocationsExt for Locations {
     fn average_time(&self) -> i64 {
         let mut time = 0;
         for i in 1..self.len() {
-            time += self[i].timestamp.timestamp() - self[i-1].timestamp.timestamp()
+            time += self[i].timestamp.timestamp() - self[i - 1].timestamp.timestamp()
         }
         time / (self.len() as i64)
     }
@@ -112,7 +115,8 @@ impl LocationsExt for Locations {
             if let Some(activities) = &location.activities {
                 for activity in activities.into_iter() {
                     // check if the highest-confidence activity is the one we want
-                    if let Some(activity) = activity.activities.iter().max_by_key(|x| x.confidence) {
+                    if let Some(activity) = activity.activities.iter().max_by_key(|x| x.confidence)
+                    {
                         if glob_match(&activity_type, &activity.activity_type) {
                             tmp.push(location.clone());
                             break;
@@ -127,7 +131,7 @@ impl LocationsExt for Locations {
 
     fn list_activities(&self) -> Vec<String> {
         // make hashmap for efficiency
-        let mut activities_set : HashSet<String> = HashSet::new();
+        let mut activities_set: HashSet<String> = HashSet::new();
 
         for location in self.into_iter() {
             // iterate through all activities recorded at this location
@@ -141,6 +145,18 @@ impl LocationsExt for Locations {
         }
 
         activities_set.into_iter().collect::<Vec<String>>()
+    }
+
+    fn filter_by_distance(self, point: Point<f64>, distance: f64) -> Locations {
+        let mut tmp: Vec<Location> = Vec::new();
+
+        for location in self.iter() {
+            let lp: Point<f64> = (&location.clone()).into();
+            if lp.haversine_distance(&point) < distance {
+                tmp.push(location.clone());
+            }
+        }
+        tmp
     }
 }
 
@@ -158,7 +174,6 @@ pub fn deserialize(from: &str) -> Locations {
         .sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     deserialized.locations
 }
-
 
 /// Reads a `Records.json` file and decodes the data on-the-fly.
 /// The file is expected to contain a single large array of `Location` objects
@@ -196,8 +211,8 @@ pub fn deserialize_streaming(from: PathBuf, tx: Sender<Location>) {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Activity {
     #[serde(rename = "type")]
-    pub activity_type : String,
-    pub confidence : i32,
+    pub activity_type: String,
+    pub confidence: i32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -205,7 +220,7 @@ pub struct Activities {
     #[serde(deserialize_with = "parse_timestamp")]
     /// timestamp this location was sampled at
     pub timestamp: DateTime<FixedOffset>,
-    
+
     /// activities list
     #[serde(rename = "activity")]
     pub activities: Vec<Activity>,
@@ -219,15 +234,15 @@ pub struct Location {
     pub timestamp: DateTime<FixedOffset>,
     #[serde(rename = "latitudeE7", deserialize_with = "parse_location")]
     /// latitude, converted from lat E7
-    pub latitude: f32,
+    pub latitude: f64,
     #[serde(rename = "longitudeE7", deserialize_with = "parse_location")]
     /// longitude, converted from long E7
-    pub longitude: f32,
+    pub longitude: f64,
     /// accuracy of location sample in meters
     pub accuracy: Option<i32>,
     /// altitude in meters, if available
     pub altitude: Option<i32>,
-    
+
     #[serde(rename = "activity")]
     pub activities: Option<Vec<Activities>>,
 }
@@ -235,21 +250,21 @@ pub struct Location {
 impl Location {
     /// calculate the haversine distance between this and another location.
     /// now uses the geo crate!
-    pub fn haversine_distance(&self, other: &Location) -> f32 {
-        let p1: Point<f32> = self.into();
-        let p2: Point<f32> = other.into();
+    pub fn haversine_distance(&self, other: &Location) -> f64 {
+        let p1: Point<f64> = self.into();
+        let p2: Point<f64> = other.into();
         p1.haversine_distance(&p2)
     }
 
     /// calculate the speed in km/h from this location to another location
     /// if a maximum time delta is exceeded, None is returned
-    pub fn speed_kmh(&self, other: &Location) -> Option<f32> {
+    pub fn speed_kmh(&self, other: &Location) -> Option<f64> {
         let dist = self.haversine_distance(other);
         let time = self.timestamp.timestamp() - other.timestamp.timestamp();
 
         // 10 minute gap
         if time > 0 && time < 600 {
-            let meter_second = dist / time as f32;
+            let meter_second = dist / time as f64;
             Some(meter_second * 3.6)
         } else {
             None
@@ -266,35 +281,36 @@ where
     let deser_result: serde_json::Value = serde::Deserialize::deserialize(de)?;
 
     match deser_result {
-        serde_json::Value::String(ref s) => Ok(DateTime::parse_from_rfc3339(
-            s
-        ).unwrap()),
+        serde_json::Value::String(ref s) => Ok(DateTime::parse_from_rfc3339(s).unwrap()),
         _ => Err(serde::de::Error::custom("Unexpected value")),
     }
 }
 
-fn parse_location<'de, D>(de: D) -> Result<f32, D::Error>
+fn parse_location<'de, D>(de: D) -> Result<f64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let deser_result: serde_json::Value = serde::Deserialize::deserialize(de)?;
     match deser_result {
-        serde_json::Value::Number(ref i) => Ok((i.as_f64().unwrap() / 10_000_000.0) as f32),
+        serde_json::Value::Number(ref i) => Ok((i.as_f64().unwrap() / 10_000_000.0) as f64),
         _ => Err(serde::de::Error::custom("Unexpected value")),
     }
 }
 
 // convert location into a Point
-impl Into<Point<f32>> for &Location {
-    fn into(self) -> Point<f32> {
-        let c : Coord<f32> = self.into();
+impl Into<Point<f64>> for &Location {
+    fn into(self) -> Point<f64> {
+        let c: Coord<f64> = self.into();
         Point::from(c)
     }
 }
 
-impl Into<Coord<f32>> for &Location {
-    fn into(self) -> Coord<f32> {
-        Coord{ x: self.longitude as f32, y: self.latitude as f32 }
+impl Into<Coord<f64>> for &Location {
+    fn into(self) -> Coord<f64> {
+        Coord {
+            x: self.latitude as f64,
+            y: self.longitude as f64,
+        }
     }
 }
 
@@ -311,7 +327,7 @@ impl std::fmt::Display for Location {
         // table.add_row(row!["latitude".bold(), self.latitude]);
         // table.add_row(row!["longitude".bold(), self.longitude]);
         // new - show as Point
-        let pt : Point<f32> = self.into();
+        let pt: Point<f64> = self.into();
         table.add_row(row!["location".bold(), format!("{:#?}", pt.0)]);
 
         // map accuracy to ??? if unknown
@@ -335,7 +351,11 @@ impl std::fmt::Display for Location {
                 let mut activities = activities.clone();
                 activities.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
                 // join each activity vec by newline, and each activity by a comma
-                activities.iter().map(|x| x.to_string()).collect::<Vec<String>>().join("\n")
+                activities
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<String>>()
+                    .join("\n")
             }
             None => "None".to_string(),
         };
@@ -362,7 +382,6 @@ impl std::fmt::Display for Activities {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
