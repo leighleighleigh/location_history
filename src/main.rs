@@ -1,11 +1,16 @@
-use itertools::Itertools;
-use anyhow::Result;
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
+#![feature(linked_list_cursors)]
 
-use geo::{Coord,Point};
+use anyhow::Result;
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Datelike};
+use itertools::Itertools;
+
+use geo::{Coord, Point};
 const MEAN_EARTH_RADIUS: f64 = 6371008.8;
 
+use colored::{ColoredString, Colorize};
 use spinner::SpinnerBuilder;
+
+use std::collections::LinkedList;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -13,13 +18,13 @@ use std::thread;
 extern crate rerun;
 
 #[allow(unused_imports)]
-use log::{debug, error, log_enabled, info, Level};
+use log::{debug, error, info, log_enabled, Level};
 
 #[allow(unused_imports)]
 use textplots::{AxisBuilder, Chart, Plot, Shape};
 
 extern crate location_history;
-use location_history::{Location, LocationsExt};
+use location_history::{ActivityType, Location, LocationsExt, Activities};
 
 use clap::Parser;
 
@@ -41,10 +46,18 @@ struct LoadArgs {
     activity_type: Option<String>,
 
     #[clap(short = 'c', number_of_values = 3, allow_hyphen_values = true)]
-    center_point_radius : Option<Vec<f64>>,
+    center_point_radius: Option<Vec<f64>>,
 
     #[arg(short = 'n')]
     record_limit: Option<usize>,
+
+    #[arg(short = 'w', default_value = "30", help = "activity window in minutes")]
+    activity_window : Option<i64>,
+
+    // flag for rerun logging
+    #[arg(short = 'r', default_value = "false")]
+    rerun: bool,
+
     records_json_path: PathBuf,
 }
 
@@ -68,8 +81,8 @@ fn convert_to_enu(coord: Coord<f64>, center_coord: Coord<f64>) -> Coord<f64> {
 }
 
 // Function to convert latitude and longitude to X/Y/Z on the globe surface
-fn convert_to_xyz(loc : &Location, center_point_radius: &Option<Vec<f64>>) -> (f64, f64, f64) {
-    let coord : Coord<f64> = loc.into();
+fn convert_to_xyz(loc: &Location, center_point_radius: &Option<Vec<f64>>) -> (f64, f64, f64) {
+    let coord: Coord<f64> = loc.into();
     let altitude = loc.altitude.unwrap_or(0) as f64;
 
     // if a centerpoint and radius is provided, we calculate the cartesian distance in meters (north / east) from the centerpoint
@@ -77,35 +90,25 @@ fn convert_to_xyz(loc : &Location, center_point_radius: &Option<Vec<f64>>) -> (f
         let center_lat = center_point_radius[0];
         let center_long = center_point_radius[1];
 
-        let center_coord : Coord<f64> = (center_lat,center_long).into();
+        let center_coord: Coord<f64> = (center_lat, center_long).into();
 
         // convert the coord into east-north-up coordinates, assuming a flat plane, relative to the center point.
         // this first requires a projection from lat/long to a flat plane, then a conversion to east-north-up
 
         let enu_dist = convert_to_enu(coord, center_coord);
 
-        return (enu_dist.x,-enu_dist.y,altitude);
+        return (enu_dist.x, -enu_dist.y, altitude);
     } else {
         // convert into cartesian coordinates, using geo
-        let (x,y) = coord.x_y();
+        let (x, y) = coord.x_y();
         // flip the latitude/longitude so that they look correct for south hemisphere, with north-up
-        (y,-x,altitude)
+        (y, -x, altitude)
     }
-
-    // // Convert latitude and longitude to radians
-    // let lat_rad = latitude.to_radians();
-    // let lon_rad = longitude.to_radians();
-    // // Radius of the Earth in meters
-    // let radius = 6371000.0;
-    // // Calculate Cartesian coordinates on the globe surface
-    // let x = radius * lat_rad.cos() * lon_rad.sin();
-    // let y = radius * lat_rad.cos() * lon_rad.cos();
-    // let z = radius * lat_rad.sin();
-    // (x, y, z)
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::init();
 
     let LocationHistoryCLI::Load(args) = LocationHistoryCLI::parse();
 
@@ -159,6 +162,7 @@ fn main() -> Result<()> {
             }
         }
 
+        // going to store this location.
         locations.push(loc);
 
         // if the record limit is reached, stop
@@ -176,6 +180,98 @@ fn main() -> Result<()> {
     ));
     sp.close();
 
+    println!();
+
+    // iterate over locations, and print a letter for each one,
+    // representing the highest-confidence activity type
+    let bubble_window : i64 = 60 * args.activity_window.unwrap_or(30);
+
+    // group the entries by month 
+    let grouped: Vec<Vec<Location>> = locations
+        .iter()
+        .group_by(|loc| loc.timestamp.month())
+        .into_iter()
+        .map(|(_, g)| g.cloned().collect())
+        .collect();
+
+    for g in grouped.iter() {
+        // print the month
+        println!("{}", g[0].timestamp.format("%B %Y").to_string().bold());
+
+        // make a linked list from the locations in this group
+        let mut act_ll : LinkedList<Activities> = LinkedList::new();
+
+        for loc in g.iter() {
+            // put our activities into the linked list
+            if let Some(act) = &loc.activities {
+                act_ll.extend(act.clone());
+            }
+        }
+
+        // iterate through the linked list, keeping a cursor on the latest non-unknown activity
+        let mut cursor = act_ll.cursor_front_mut();
+        let mut last_known_activity : Option<Activities> = None;
+
+        while let Some(acts) = cursor.current() {
+            let top_act = acts.top_activity();
+            let mut top_act_type : ActivityType = top_act.into();
+
+            match top_act_type {
+                // if our current activity type is unknown, and the time since the last known activity is less than the bubble window,
+                // set the activity type to the last known activity
+                ActivityType::UNKNOWN => {
+                    if let Some(last_activity) = &last_known_activity {
+                        if acts.timestamp.timestamp() - last_activity.timestamp.timestamp() < bubble_window {
+                            // replace activity_t
+                            top_act_type = last_activity.top_activity().into();
+                        }
+                    }
+                },
+                // if we have an activity type, set the last known activity to it
+                _ => {
+                    if let Some(last_activity) = &last_known_activity {
+                        // if the type is the same
+                        let last_top_act : ActivityType = last_activity.top_activity().into();
+
+                        if last_top_act == top_act_type {
+                            // if the timestamp is more recent, replace it
+                            if acts.timestamp.timestamp() > last_activity.timestamp.timestamp() {
+                                last_known_activity = Some(acts.clone());
+                            }
+                        } else {
+                            // if the type is different, but we CONTAIN the same type, 
+                            // just update the timestamp of the last_known_activity (keeping it's type)
+                            let top_act_types = acts.top_activities().into_iter().map(|act| act.into()).collect::<Vec<ActivityType>>();
+
+                            if top_act_types.contains(&last_top_act) {
+                                let mut last_updt = last_activity.clone();
+                                last_updt.timestamp = acts.timestamp.clone();
+                                
+                                // also update our current activity type
+                                top_act_type = last_updt.top_activity().into();
+
+                                last_known_activity = Some(last_updt);
+                            } else {
+                                // otherwise, replace it entirely
+                                last_known_activity = Some(acts.clone());
+                            }
+                        }
+                    } else {
+                        last_known_activity = Some(acts.clone());
+                    }
+                },
+            };
+
+            // print the activity type, after casting to colored string
+            let act_c : ColoredString = top_act_type.into();
+            print!("{}", act_c);
+
+            cursor.move_next();
+        }
+    }
+
+    println!();
+
     // remove high-velocity outliers
     let mut filtered_locations = locations.clone();
 
@@ -190,7 +286,7 @@ fn main() -> Result<()> {
         let long = center_point_radius[1];
         let radius = center_point_radius[2];
 
-        let origin : Point<f64> = Point::new(lat, long);
+        let origin: Point<f64> = Point::new(lat, long);
         filtered_locations = filtered_locations.filter_by_distance(origin, radius);
     }
 
@@ -201,7 +297,6 @@ fn main() -> Result<()> {
     for activity in activity_list {
         info!(" - {}", activity);
     }
-
 
     len_before = filtered_locations.len();
 
@@ -215,64 +310,43 @@ fn main() -> Result<()> {
         );
     }
 
-    // print some locations
-    for loc in filtered_locations.iter().take(1) {
-        info!("\n{}", loc);
-    }
-
-    // group lines by day
-    let line_groups : Vec<Vec<Location>> = filtered_locations
-        .iter()
-        .group_by(|loc| loc.timestamp.timestamp() / 3600)
-        .into_iter()
-        .map(|(_,g)| g.cloned().collect())
-        .collect();
-
-    // plot with rerun!
-    let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").spawn()?;
-
-    for group in line_groups {
-        let time = group[0].timestamp.timestamp() as f64;
-
-        // vec of x,y,z (lat long  altitude)
-        let coords : Vec<(f64,f64,f64)> = group.iter().map(|loc| convert_to_xyz(loc, &args.center_point_radius)).collect();
-        let coords_pts : Vec<(f32,f32)> = coords.iter().map(|(x,y,_)| (*x as f32,*y as f32)).collect();
-
-        // make a rerun LineStrips3D object
-        let linestrip = rerun::LineStrips2D::new(vec![coords_pts]);
-
-        rec.set_time_seconds("time", time);
-        rec.log("position", &linestrip).unwrap();
-    }
-
-    // for (time,coord) in txy {
-    //     rec.set_time_seconds("time", time);
-    //     rec.log("position", &rerun::Points3D::new(vec![coord])).unwrap();
+    // // print some locations
+    // for loc in filtered_locations.iter().take(1) {
+    //     info!("\n{}", loc);
     // }
 
+    if args.rerun {
+        // group lines by day
+        let line_groups: Vec<Vec<Location>> = filtered_locations
+            .iter()
+            .group_by(|loc| loc.timestamp.timestamp() / 3600)
+            .into_iter()
+            .map(|(_, g)| g.cloned().collect())
+            .collect();
 
-    // let positions: Vec<Coord<f64>> = filtered_locations
-    //     .iter()
-    //     .map(|loc| loc.into())
-    //     .collect();
+        // plot with rerun!
+        let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").spawn()?;
 
-    // // convert the times to unix epoch seconds/milliseconds
-    // let times: Vec<i64> = times.iter().map(|dt| dt.timestamp_millis()).collect();
-    // // convert the positions to tuples
-    // let xys: Vec<(f64, f64)> = positions.iter().map(|p| (p.x, p.y)).collect();
-    // let xs: Vec<f64> = positions.iter().map(|p| (p.x)).collect();
-    // let ys: Vec<f64> = positions.iter().map(|p| (p.y)).collect();
+        for group in line_groups {
+            let time = group[0].timestamp.timestamp() as f64;
 
-    // // get min/max of x and y
-    // let min_x = xs.clone().into_iter().reduce(f64::min).unwrap_or(0.0);
-    // let max_x = xs.clone().into_iter().reduce(f64::max).unwrap_or(0.0);
-    // let min_y = ys.clone().into_iter().reduce(f64::min).unwrap_or(0.0);
-    // let max_y = ys.clone().into_iter().reduce(f64::max).unwrap_or(0.0);
-    // // use term_size to get the terminal size
-    // let (w, h) = term_size::dimensions().unwrap();
-    // Chart::new_with_y_range((w*1) as u32, (h*3) as u32, min_x, max_x, min_y, max_y)
-    //     .lineplot(&Shape::Lines(&xys))
-    //     .nice();
+            // vec of x,y,z (lat long  altitude)
+            let coords: Vec<(f64, f64, f64)> = group
+                .iter()
+                .map(|loc| convert_to_xyz(loc, &args.center_point_radius))
+                .collect();
+            let coords_pts: Vec<(f32, f32)> = coords
+                .iter()
+                .map(|(x, y, _)| (*x as f32, *y as f32))
+                .collect();
+
+            // make a rerun LineStrips3D object
+            let linestrip = rerun::LineStrips2D::new(vec![coords_pts]);
+
+            rec.set_time_seconds("time", time);
+            rec.log("position", &linestrip).unwrap();
+        }
+    }
 
     // wait for the reader to finish
     reader_jh.join().unwrap();

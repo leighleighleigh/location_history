@@ -5,7 +5,7 @@ use chrono::{DateTime, FixedOffset};
 use serde_derive::{Deserialize, Serialize};
 
 extern crate prettytable;
-use colored::Colorize;
+use colored::{Colorize, ColoredString};
 use prettytable::row;
 
 extern crate struson;
@@ -208,6 +208,21 @@ pub fn deserialize_streaming(from: PathBuf, tx: Sender<Location>) {
     }
 }
 
+// make an activity type Enum, which will be useful for color-coding and filtering things by activity
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
+#[allow(non_camel_case_types)]
+pub enum ActivityType {
+    IN_VEHICLE,
+    EXITING_VEHICLE,
+    ON_BICYCLE,
+    ON_FOOT,
+    RUNNING,
+    STILL,
+    TILTING,
+    UNKNOWN,
+    WALKING,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Activity {
     #[serde(rename = "type")]
@@ -269,6 +284,53 @@ impl Location {
         } else {
             None
         }
+    }
+
+    pub fn top_activities(&self) -> Vec<Activity> {
+        // makes a flat list of activities, in descending order.
+        // we cant simply store the top activity - as quite frequently, there will be multiple
+        // items of equal value. 
+        let mut result : Vec<Activity> = Vec::new();
+
+        if let Some(acts) = &self.activities {
+            for activity_vec in acts {
+                result.extend(activity_vec.top_activities());
+            }
+        }
+
+        // sort the super list
+        result.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        result
+    }
+}
+
+impl Activities {
+    pub fn top_activity(&self) -> Activity {
+        let act = self.top_activities();
+
+        if act.len() > 0 {
+            act[0].clone()
+        } else {
+            Activity {
+                activity_type: "UNKNOWN".to_string(),
+                confidence: 0,
+            }
+        }
+    }
+
+    pub fn top_activities(&self) -> Vec<Activity> {
+        // makes a flat list of activities, in descending order.
+        // we cant simply store the top activity - as quite frequently, there will be multiple
+        // items of equal value. 
+        let mut result : Vec<Activity> = Vec::new();
+
+        for act in self.activities.iter() {
+            result.push(act.clone());
+        }
+
+        // sort the list by confidence
+        result.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        result
     }
 }
 
@@ -363,6 +425,41 @@ impl std::fmt::Display for Location {
 
         // write the table to the formatter
         table.fmt(f)
+    }
+}
+
+impl Into<ActivityType> for Activity {
+    fn into(self) -> ActivityType {
+        match self.activity_type.as_str() {
+            "IN_VEHICLE" => ActivityType::IN_VEHICLE,
+            "EXITING_VEHICLE" => ActivityType::EXITING_VEHICLE,
+            "ON_BICYCLE" => ActivityType::ON_BICYCLE,
+            "ON_FOOT" => ActivityType::ON_FOOT,
+            "RUNNING" => ActivityType::RUNNING,
+            "STILL" => ActivityType::STILL,
+            "TILTING" => ActivityType::TILTING,
+            "UNKNOWN" => ActivityType::UNKNOWN,
+            "WALKING" => ActivityType::WALKING,
+            _ => ActivityType::UNKNOWN,
+        }
+    }
+}
+
+// convert activity types into single characters! :)
+// this makes it easy to see sequences of related activities
+impl Into<ColoredString> for ActivityType {
+    fn into(self) -> ColoredString {
+        match self {
+            ActivityType::IN_VEHICLE => "$".to_string().bright_blue().on_blue(),
+            ActivityType::EXITING_VEHICLE => "^".to_string().bright_blue().on_blue(),
+            ActivityType::ON_FOOT => "#".to_string().bright_green().on_green(),
+            ActivityType::WALKING => "#".to_string().bright_green().on_green(),
+            ActivityType::RUNNING => "#".to_string().green().on_bright_green(),
+            ActivityType::ON_BICYCLE => "%".to_string().bright_yellow().on_yellow(),
+            ActivityType::STILL => ".".to_string().white(),
+            ActivityType::TILTING => "/".to_string().dimmed(),
+            ActivityType::UNKNOWN => "?".to_string().dimmed(),
+        }
     }
 }
 
