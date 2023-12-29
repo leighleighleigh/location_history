@@ -1,8 +1,9 @@
 use itertools::Itertools;
 use anyhow::Result;
-use chrono::{DateTime, Local, NaiveDate, TimeZone, Datelike};
+use chrono::{DateTime, Local, NaiveDate, TimeZone};
 
 use geo::{Coord,Point};
+const MEAN_EARTH_RADIUS: f64 = 6371008.8;
 
 use spinner::SpinnerBuilder;
 use std::path::PathBuf;
@@ -47,16 +48,49 @@ struct LoadArgs {
     records_json_path: PathBuf,
 }
 
+// Function to convert geographic coordinates to local east-north-up coordinates
+fn convert_to_enu(coord: Coord<f64>, center_coord: Coord<f64>) -> Coord<f64> {
+    // Convert latitude and longitude to radians
+    let lat_rad = coord.x.to_radians();
+    let lon_rad = coord.y.to_radians();
+
+    // Center coordinates in radians
+    let center_lat_rad = center_coord.x.to_radians();
+    let center_lon_rad = center_coord.y.to_radians();
+
+    // Calculate true northward and eastward distances
+    let northward = (lat_rad - center_lat_rad) * MEAN_EARTH_RADIUS;
+    let eastward = (lon_rad - center_lon_rad) * MEAN_EARTH_RADIUS * lat_rad.cos();
+
+    // Upward is assumed to be zero for a flat-plane approximation
+
+    Coord::from((eastward, northward))
+}
+
 // Function to convert latitude and longitude to X/Y/Z on the globe surface
-fn convert_to_xyz(loc : &Location) -> (f64, f64, f64) {
+fn convert_to_xyz(loc : &Location, center_point_radius: &Option<Vec<f64>>) -> (f64, f64, f64) {
     let coord : Coord<f64> = loc.into();
     let altitude = loc.altitude.unwrap_or(0) as f64;
 
-    // convert into cartesian coordinates, using geo
-    let (x,y) = coord.x_y();
-    // flip the latitude/longitude so that they look correct for south hemisphere, with north-up
-    (y,-x,altitude)
+    // if a centerpoint and radius is provided, we calculate the cartesian distance in meters (north / east) from the centerpoint
+    if let Some(ref center_point_radius) = center_point_radius {
+        let center_lat = center_point_radius[0];
+        let center_long = center_point_radius[1];
 
+        let center_coord : Coord<f64> = (center_lat,center_long).into();
+
+        // convert the coord into east-north-up coordinates, assuming a flat plane, relative to the center point.
+        // this first requires a projection from lat/long to a flat plane, then a conversion to east-north-up
+
+        let enu_dist = convert_to_enu(coord, center_coord);
+
+        return (enu_dist.x,-enu_dist.y,altitude);
+    } else {
+        // convert into cartesian coordinates, using geo
+        let (x,y) = coord.x_y();
+        // flip the latitude/longitude so that they look correct for south hemisphere, with north-up
+        (y,-x,altitude)
+    }
 
     // // Convert latitude and longitude to radians
     // let lat_rad = latitude.to_radians();
@@ -151,7 +185,7 @@ fn main() -> Result<()> {
     let delta: i64 = (len_before - filtered_locations.len()) as i64;
     info!("Removed {} outliers by velocity", delta);
 
-    if let Some(center_point_radius) = args.center_point_radius {
+    if let Some(ref center_point_radius) = args.center_point_radius {
         let lat = center_point_radius[0];
         let long = center_point_radius[1];
         let radius = center_point_radius[2];
@@ -201,10 +235,8 @@ fn main() -> Result<()> {
         let time = group[0].timestamp.timestamp() as f64;
 
         // vec of x,y,z (lat long  altitude)
-        let coords : Vec<(f64,f64,f64)> = group.iter().map(|loc| convert_to_xyz(loc)).collect();
-        let mut coords_pts : Vec<(f32,f32)> = coords.iter().map(|(x,y,_)| (*x as f32,*y as f32)).collect();
-        // multiply the points by 10 to make them visible
-        coords_pts = coords_pts.iter().map(|(x,y)| (*x * 10.0,*y * 10.0)).collect();
+        let coords : Vec<(f64,f64,f64)> = group.iter().map(|loc| convert_to_xyz(loc, &args.center_point_radius)).collect();
+        let coords_pts : Vec<(f32,f32)> = coords.iter().map(|(x,y,_)| (*x as f32,*y as f32)).collect();
 
         // make a rerun LineStrips3D object
         let linestrip = rerun::LineStrips2D::new(vec![coords_pts]);
