@@ -11,13 +11,18 @@ use colored::Colorize;
 extern crate struson;
 use struson::reader::{JsonStreamReader,JsonReader};
 use struson::json_path;
+use std::collections::HashSet;
 use std::io::BufReader;
-use std::str::Lines;
 use std::sync::mpsc::Sender;
 use std::fs::File;
 use std::path::PathBuf;
 
-use geo::{Point,LineString,HaversineDistance, Coord};
+use glob_match::glob_match;
+
+#[allow(unused_imports)]
+use log::{debug, error, log_enabled, info, Level};
+
+use geo::{Point,HaversineDistance,Coord};
 
 /// group of locations
 pub type Locations = Vec<Location>;
@@ -37,7 +42,14 @@ pub trait LocationsExt {
     fn filter_outliers(self) -> Locations;
 
     // filter by activity, where the highest-confidence activity is the one that is passed as argument
+    // uses glob_match to compare the activity type - so you can write:
+    // {ON_FOOT,STILL} # for either case
+    // ON_*            # for whenever we are on something
+    // IN_*            # for whenever we are IN something
     fn filter_by_activity(self, activity: String) -> Locations;
+
+    // retrieves the unique set of activity types in the data
+    fn list_activities(&self) -> Vec<String>;
 }
 
 impl LocationsExt for Locations {
@@ -101,7 +113,7 @@ impl LocationsExt for Locations {
                 for activity in activities.into_iter() {
                     // check if the highest-confidence activity is the one we want
                     if let Some(activity) = activity.activities.iter().max_by_key(|x| x.confidence) {
-                        if activity.activity_type == activity_type {
+                        if glob_match(&activity_type, &activity.activity_type) {
                             tmp.push(location.clone());
                             break;
                         }
@@ -111,6 +123,24 @@ impl LocationsExt for Locations {
         }
         tmp.sort_chronological();
         tmp
+    }
+
+    fn list_activities(&self) -> Vec<String> {
+        // make hashmap for efficiency
+        let mut activities_set : HashSet<String> = HashSet::new();
+
+        for location in self.into_iter() {
+            // iterate through all activities recorded at this location
+            if let Some(activities) = &location.activities {
+                for activity in activities.into_iter() {
+                    for act in activity.activities.iter() {
+                        activities_set.insert(act.activity_type.clone());
+                    }
+                }
+            }
+        }
+
+        activities_set.into_iter().collect::<Vec<String>>()
     }
 }
 

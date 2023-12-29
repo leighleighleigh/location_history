@@ -1,13 +1,20 @@
+use itertools::Itertools;
 use anyhow::Result;
-use chrono::{DateTime, FixedOffset, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, TimeZone};
+
 use geo::Coord;
+
 use spinner::SpinnerBuilder;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::thread;
 
 extern crate rerun;
-use gnuplot::{Caption, Color, Figure};
+
+#[allow(unused_imports)]
+use log::{debug, error, log_enabled, info, Level};
+
+#[allow(unused_imports)]
 use textplots::{AxisBuilder, Chart, Plot, Shape};
 
 extern crate location_history;
@@ -36,7 +43,28 @@ struct LoadArgs {
     records_json_path: PathBuf,
 }
 
+// Function to convert latitude and longitude to X/Y/Z on the globe surface
+fn convert_to_xyz(coord : Coord<f32>) -> (f32, f32, f32) {
+    let latitude = coord.x;
+    let longitude = coord.y;
+    // Convert latitude and longitude to radians
+    let lat_rad = latitude.to_radians();
+    let lon_rad = longitude.to_radians();
+
+    // Radius of the Earth in meters
+    let radius = 6371000.0;
+
+    // Calculate Cartesian coordinates on the globe surface
+    let x = radius * lat_rad.cos() * lon_rad.sin();
+    let y = radius * lat_rad.cos() * lon_rad.cos();
+    let z = radius * lat_rad.sin();
+
+    (x, y, z)
+}
+
 fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let LocationHistoryCLI::Load(args) = LocationHistoryCLI::parse();
 
     // parse start_date and end_date, if provided. assume the format is yy_mm_dd, and is provided in our local timezone
@@ -113,7 +141,16 @@ fn main() -> Result<()> {
     let mut len_before = filtered_locations.len();
     filtered_locations = filtered_locations.filter_outliers();
     let delta: i64 = (len_before - filtered_locations.len()) as i64;
-    println!("Removed {} outliers by velocity", delta);
+    info!("Removed {} outliers by velocity", delta);
+
+    // print the list of activities
+    info!("Activities:");
+    let activity_list = filtered_locations.list_activities();
+
+    for activity in activity_list {
+        info!(" - {}", activity);
+    }
+
 
     len_before = filtered_locations.len();
 
@@ -121,7 +158,7 @@ fn main() -> Result<()> {
     if let Some(activity_type) = args.activity_type {
         filtered_locations = filtered_locations.filter_by_activity(activity_type.into());
         // store length after filtering
-        println!(
+        info!(
             "Removed {} locations by activity type",
             len_before - filtered_locations.len()
         );
@@ -129,14 +166,38 @@ fn main() -> Result<()> {
 
     // print some locations
     for loc in filtered_locations.iter().take(1) {
-        println!("{}", loc);
+        info!("\n{}", loc);
     }
 
     // make a linestring from the first 10
-    let txy : Vec<(f64,Coord<f32>)> = filtered_locations
+    let txy : Vec<(f64,(f32,f32,f32))> = filtered_locations
         .iter()
-        .map(|loc| (loc.timestamp.timestamp() as f64, loc.into()))
+        .map(|loc| (loc.timestamp.timestamp() as f64, convert_to_xyz(loc.into())))
         .collect();
+
+    // group the points by their timestamp - if they are within 30 minutes of each other, they are in the same group
+    let line_groups : Vec<Vec<(f64,(f32,f32,f32))>> = txy
+        .iter()
+        .group_by(|(t,_)| t.floor() as i64)
+        .into_iter()
+        .map(|(_,g)| g.cloned().collect())
+        .collect();
+
+    // plot with rerun!
+    let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").spawn()?;
+
+    for group in line_groups {
+        let time = group[0].0;
+        let coords : Vec<(f32,f32,f32)> = group.iter().map(|(_,c)| *c).collect();
+        rec.set_time_seconds("time", time);
+        rec.log("position", &rerun::Points3D::new(coords)).unwrap();
+    }
+
+    // for (time,coord) in txy {
+    //     rec.set_time_seconds("time", time);
+    //     rec.log("position", &rerun::Points3D::new(vec![coord])).unwrap();
+    // }
+
 
     // let positions: Vec<Coord<f32>> = filtered_locations
     //     .iter()
@@ -160,21 +221,6 @@ fn main() -> Result<()> {
     // Chart::new_with_y_range((w*1) as u32, (h*3) as u32, min_x, max_x, min_y, max_y)
     //     .lineplot(&Shape::Lines(&xys))
     //     .nice();
-
-    // plot with rerun!
-    // Stream log data to an awaiting `rerun` process.
-    let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").spawn()?;
-
-    // let points: Vec<rerun::Position2D> = xys.iter().map(|(x, y)| rerun::Position2D::new(*x, *y)).collect();
-    // rec.set_time_sequence("time", 42);
-    // rec.log("position", &rerun::Points2D::new(points)).unwrap();
-    // rec.log("position", &rerun::Points2D::new(xys)).unwrap();
-
-    for (time,coord) in txy {
-        rec.set_time_seconds("time", time);
-        rec.log("position", &rerun::Points2D::new(vec![(-coord.x, -coord.y)])).unwrap();
-    }
-
 
     // wait for the reader to finish
     reader_jh.join().unwrap();
