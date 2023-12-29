@@ -133,43 +133,47 @@ fn main() -> Result<()> {
     }
 
     // make a linestring from the first 10
-    // let times: Vec<(i64,Coord<f32>)> = filtered_locations
-    //     .iter()
-    //     .map(|loc| (loc.timestamp.timestamp_millis(), loc.into()))
-    //     .collect();
-
-    let positions: Vec<Coord<f32>> = filtered_locations
+    let txy : Vec<(f64,Coord<f32>)> = filtered_locations
         .iter()
-        .map(|loc| loc.into())
+        .map(|loc| (loc.timestamp.timestamp() as f64, loc.into()))
         .collect();
+
+    // let positions: Vec<Coord<f32>> = filtered_locations
+    //     .iter()
+    //     .map(|loc| loc.into())
+    //     .collect();
 
     // // convert the times to unix epoch seconds/milliseconds
     // let times: Vec<i64> = times.iter().map(|dt| dt.timestamp_millis()).collect();
     // // convert the positions to tuples
-    let xys: Vec<(f32, f32)> = positions.iter().map(|p| (p.x, p.y)).collect();
-    let xs: Vec<f32> = positions.iter().map(|p| (p.x)).collect();
-    let ys: Vec<f32> = positions.iter().map(|p| (p.y)).collect();
+    // let xys: Vec<(f32, f32)> = positions.iter().map(|p| (p.x, p.y)).collect();
+    // let xs: Vec<f32> = positions.iter().map(|p| (p.x)).collect();
+    // let ys: Vec<f32> = positions.iter().map(|p| (p.y)).collect();
 
-    // get min/max of x and y
-    let min_x = xs.clone().into_iter().reduce(f32::min).unwrap_or(0.0);
-    let max_x = xs.clone().into_iter().reduce(f32::max).unwrap_or(0.0);
-    let min_y = ys.clone().into_iter().reduce(f32::min).unwrap_or(0.0);
-    let max_y = ys.clone().into_iter().reduce(f32::max).unwrap_or(0.0);
-    // use term_size to get the terminal size
-    let (w, h) = term_size::dimensions().unwrap();
-    Chart::new_with_y_range((w*1) as u32, (h*3) as u32, min_x, max_x, min_y, max_y)
-        .lineplot(&Shape::Lines(&xys))
-        .nice();
+    // // get min/max of x and y
+    // let min_x = xs.clone().into_iter().reduce(f32::min).unwrap_or(0.0);
+    // let max_x = xs.clone().into_iter().reduce(f32::max).unwrap_or(0.0);
+    // let min_y = ys.clone().into_iter().reduce(f32::min).unwrap_or(0.0);
+    // let max_y = ys.clone().into_iter().reduce(f32::max).unwrap_or(0.0);
+    // // use term_size to get the terminal size
+    // let (w, h) = term_size::dimensions().unwrap();
+    // Chart::new_with_y_range((w*1) as u32, (h*3) as u32, min_x, max_x, min_y, max_y)
+    //     .lineplot(&Shape::Lines(&xys))
+    //     .nice();
 
-    // // plot with rerun!
-    // // Stream log data to an awaiting `rerun` process.
-    // let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").connect()?;
-    // // let points: Vec<rerun::Position2D> = xys.iter().map(|(x, y)| rerun::Position2D::new(*x, *y)).collect();
+    // plot with rerun!
+    // Stream log data to an awaiting `rerun` process.
+    let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").spawn()?;
+
+    // let points: Vec<rerun::Position2D> = xys.iter().map(|(x, y)| rerun::Position2D::new(*x, *y)).collect();
     // rec.set_time_sequence("time", 42);
-    // // rec.log("position", &rerun::Points2D::new(points)).unwrap();
+    // rec.log("position", &rerun::Points2D::new(points)).unwrap();
     // rec.log("position", &rerun::Points2D::new(xys)).unwrap();
 
-
+    for (time,coord) in txy {
+        rec.set_time_seconds("time", time);
+        rec.log("position", &rerun::Points2D::new(vec![(-coord.x, -coord.y)])).unwrap();
+    }
 
 
     // wait for the reader to finish
