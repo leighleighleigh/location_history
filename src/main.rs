@@ -10,7 +10,7 @@ const MEAN_EARTH_RADIUS: f64 = 6371008.8;
 use colored::{ColoredString, Colorize};
 use spinner::SpinnerBuilder;
 
-use std::collections::LinkedList;
+use std::collections::{LinkedList, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -24,7 +24,7 @@ use log::{debug, error, info, log_enabled, Level};
 use textplots::{AxisBuilder, Chart, Plot, Shape};
 
 extern crate location_history;
-use location_history::{ActivityType, Location, LocationsExt, Activities};
+use location_history::{ActivityType, Location, LocationsExt, Activities, Activity};
 
 use clap::Parser;
 
@@ -189,84 +189,44 @@ fn main() -> Result<()> {
     // group the entries by month 
     let grouped: Vec<Vec<Location>> = locations
         .iter()
-        .group_by(|loc| loc.timestamp.month())
+        .group_by(|loc| loc.timestamp.num_days_from_ce())
         .into_iter()
         .map(|(_, g)| g.cloned().collect())
         .collect();
 
     for g in grouped.iter() {
         // print the month
-        println!("{}", g[0].timestamp.format("%B %Y").to_string().bold());
+        print!("\n{:<20}", g[0].timestamp.format("%d %B %Y").to_string().bold());
 
         // make a linked list from the locations in this group
-        let mut act_ll : LinkedList<Activities> = LinkedList::new();
+        let mut act_ll : Vec<Activities> = Vec::new();
 
         for loc in g.iter() {
             // put our activities into the linked list
-            if let Some(act) = &loc.activities {
-                act_ll.extend(act.clone());
-            }
+            act_ll.push(loc.merged_activities());
         }
 
-        // iterate through the linked list, keeping a cursor on the latest non-unknown activity
-        let mut cursor = act_ll.cursor_front_mut();
-        let mut last_known_activity : Option<Activities> = None;
+        let mut last_act : Option<Activity> = None;
+        let mut last_act_type : ActivityType = ActivityType::UNKNOWN;
 
-        while let Some(acts) = cursor.current() {
-            let top_act = acts.top_activity();
-            let mut top_act_type : ActivityType = top_act.into();
+        for acts in act_ll {
+            let top_act_type = acts.top_activity_type();
 
+            // if the activity type has not changed, ignore
+            if top_act_type == last_act_type {
+                continue;
+            } else {
+                last_act_type = top_act_type;
+            }
+            
             match top_act_type {
-                // if our current activity type is unknown, and the time since the last known activity is less than the bubble window,
-                // set the activity type to the last known activity
-                ActivityType::UNKNOWN => {
-                    if let Some(last_activity) = &last_known_activity {
-                        if acts.timestamp.timestamp() - last_activity.timestamp.timestamp() < bubble_window {
-                            // replace activity_t
-                            top_act_type = last_activity.top_activity().into();
-                        }
-                    }
-                },
-                // if we have an activity type, set the last known activity to it
+                ActivityType::UNKNOWN | ActivityType::STILL | ActivityType::TILTING => {continue}
                 _ => {
-                    if let Some(last_activity) = &last_known_activity {
-                        // if the type is the same
-                        let last_top_act : ActivityType = last_activity.top_activity().into();
-
-                        if last_top_act == top_act_type {
-                            // if the timestamp is more recent, replace it
-                            if acts.timestamp.timestamp() > last_activity.timestamp.timestamp() {
-                                last_known_activity = Some(acts.clone());
-                            }
-                        } else {
-                            // if the type is different, but we CONTAIN the same type, 
-                            // just update the timestamp of the last_known_activity (keeping it's type)
-                            let top_act_types = acts.top_activities().into_iter().map(|act| act.into()).collect::<Vec<ActivityType>>();
-
-                            if top_act_types.contains(&last_top_act) {
-                                let mut last_updt = last_activity.clone();
-                                last_updt.timestamp = acts.timestamp.clone();
-                                
-                                // also update our current activity type
-                                top_act_type = last_updt.top_activity().into();
-
-                                last_known_activity = Some(last_updt);
-                            } else {
-                                // otherwise, replace it entirely
-                                last_known_activity = Some(acts.clone());
-                            }
-                        }
-                    } else {
-                        last_known_activity = Some(acts.clone());
-                    }
-                },
-            };
-
-            // print the activity type, after casting to colored string
-            let act_c : ColoredString = top_act_type.into();
-            print!("{}", act_c);
-
-            cursor.move_next();
+                    // print the activity type, after casting to colored string
+                    let act_c : ColoredString = top_act_type.into();
+                    print!("{}", act_c);
+                }
+            }
         }
     }
 

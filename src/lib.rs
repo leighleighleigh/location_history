@@ -9,7 +9,7 @@ use colored::{Colorize, ColoredString};
 use prettytable::row;
 
 extern crate struson;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -302,6 +302,46 @@ impl Location {
         result.sort_by(|a, b| b.confidence.cmp(&a.confidence));
         result
     }
+
+    pub fn merged_activities(&self) -> Activities {
+        // merge all activities into a single list
+        let mut result = Activities {
+            timestamp: self.timestamp,
+            activities: Vec::new(),
+        };
+
+        let mut all_activities : HashMap<ActivityType, i32> = HashMap::new();
+
+        if let Some(acts) = &self.activities {
+            for activity_vec in acts {
+                // make a hashmap
+                let activities : HashMap<ActivityType, i32> = activity_vec.into();
+                
+                // add to all_activities, summing the confidence
+                // add the confidences to the hashmap
+                for (k, v) in activities.iter() {
+                    *all_activities.entry(*k).or_insert(0) += v;
+                }
+
+            }
+        }
+
+        // convert to a vector, using the hashmap as a guide
+        let mut activities : Vec<Activity> = Vec::new();
+        for (act_type, confidence) in all_activities.iter() {
+            activities.push(Activity {
+                activity_type: act_type.into(),
+                confidence: confidence.clone(),
+            });
+        }
+
+        // sort the list by confidence
+        activities.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        result.activities = activities;
+
+        result
+    }
+
 }
 
 impl Activities {
@@ -324,12 +364,65 @@ impl Activities {
         // items of equal value. 
         let mut result : Vec<Activity> = Vec::new();
 
-        for act in self.activities.iter() {
-            result.push(act.clone());
+        // make a hashmap
+        let activities : HashMap<ActivityType, i32> = self.into();
+        
+        // convert to a vector, using the hashmap as a guide
+        for (act_type, confidence) in activities.iter() {
+            result.push(Activity {
+                activity_type: act_type.into(),
+                confidence: confidence.clone(),
+            });
         }
 
         // sort the list by confidence
         result.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        result
+    }
+
+    pub fn top_activity_type(&self) -> ActivityType {
+        let act = self.top_activity();
+        act.into()
+    }
+
+    pub fn seconds_delta(&self, other: &Activities) -> i64 {
+        self.timestamp.timestamp() - other.timestamp.timestamp()
+    }
+
+    pub fn is_similar_type(&self, other: &Activities) -> bool {
+        // if our top activity is within the top 3 of the other top activities, ignoring time delta
+        let top_act = self.top_activity();
+        let other_top_act : Vec<Activity> = other.top_activities().into_iter().take(3).collect();
+
+        for act in other_top_act {
+            if act.activity_type == top_act.activity_type {
+                return true;
+            }
+        }
+        false
+    }
+
+}
+
+// impliment to HashMap conversion of Activities- this is useful for grouping activities by type, and summing them.
+impl Into<HashMap<ActivityType, i32>> for &Activities {
+    fn into(self) -> HashMap<ActivityType, i32> {
+        let mut result: HashMap<ActivityType, i32> = HashMap::new();
+
+        for act in self.activities.iter() {
+            let act_type: ActivityType = act.clone().into();
+            let act_confidence: i32 = act.confidence.clone();
+
+            // if we already have this activity type, add the confidence to it
+            if result.contains_key(&act_type) {
+                let current_confidence = result.get(&act_type).unwrap();
+                result.insert(act_type, current_confidence + act_confidence);
+            } else {
+                // otherwise, add it to the hashmap
+                result.insert(act_type, act_confidence);
+            }
+        }
+
         result
     }
 }
@@ -441,6 +534,22 @@ impl Into<ActivityType> for Activity {
             "UNKNOWN" => ActivityType::UNKNOWN,
             "WALKING" => ActivityType::WALKING,
             _ => ActivityType::UNKNOWN,
+        }
+    }
+}
+
+impl Into<String> for &ActivityType {
+    fn into(self) -> String {
+        match self {
+            ActivityType::IN_VEHICLE => "IN_VEHICLE".to_string(),
+            ActivityType::EXITING_VEHICLE => "EXITING_VEHICLE".to_string(),
+            ActivityType::ON_BICYCLE => "ON_BICYCLE".to_string(),
+            ActivityType::ON_FOOT => "ON_FOOT".to_string(),
+            ActivityType::RUNNING => "RUNNING".to_string(),
+            ActivityType::STILL => "STILL".to_string(),
+            ActivityType::TILTING => "TILTING".to_string(),
+            ActivityType::UNKNOWN => "UNKNOWN".to_string(),
+            ActivityType::WALKING => "WALKING".to_string(),
         }
     }
 }
