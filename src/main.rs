@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Datelike};
-use itertools::Itertools;
+use itertools::{Itertools,max};
 
 use geo::{Coord, Point};
 const MEAN_EARTH_RADIUS: f64 = 6371008.8;
@@ -152,12 +152,12 @@ fn main() -> Result<()> {
 
         // check if the location is within the date range
         if let Some(start_date) = start_date {
-            if loc.timestamp <= start_date {
+            if loc.timestamp.date_naive() < start_date.date_naive() {
                 continue;
             }
         }
         if let Some(end_date) = end_date {
-            if loc.timestamp >= end_date {
+            if loc.timestamp.date_naive() >= end_date.date_naive() {
                 continue;
             }
         }
@@ -189,45 +189,77 @@ fn main() -> Result<()> {
     // group the entries by month 
     let grouped: Vec<Vec<Location>> = locations
         .iter()
-        .group_by(|loc| loc.timestamp.num_days_from_ce())
+        .group_by(|loc| loc.timestamp.date_naive().month())
         .into_iter()
         .map(|(_, g)| g.cloned().collect())
         .collect();
+    
 
+    // GROUP BY MONTH, THEN WEEK, THEN DAY!
     for g in grouped.iter() {
         // print the month
-        print!("\n{:<20}", g[0].timestamp.format("%d %B %Y").to_string().bold());
+        println!("\n{}",format!("{:<4} {}", g[0].timestamp.format("%Y").to_string(), g[0].timestamp.format("%B").to_string().bold()).black().on_white());
 
-        // make a linked list from the locations in this group
-        let mut act_ll : Vec<Activities> = Vec::new();
+        let by_week : Vec<Vec<Location>> = g.iter()
+                                            .group_by(|loc| loc.timestamp.date_naive().iso_week())
+                                            .into_iter()
+                                            .map(|(_, g)| g.cloned().collect())
+                                            .collect();
 
-        for loc in g.iter() {
-            // put our activities into the linked list
-            act_ll.push(loc.merged_activities());
-        }
+        
+        for week in by_week.iter() {
+            // For each week in this month, print the week number
+            println!("{:>6} {}","W",format!("{:<02}",week[0].timestamp.iso_week().week()).bold());
 
-        let mut last_act : Option<Activity> = None;
-        let mut last_act_type : ActivityType = ActivityType::UNKNOWN;
-
-        for acts in act_ll {
-            let top_act_type = acts.top_activity_type();
-
-            // if the activity type has not changed, ignore
-            if top_act_type == last_act_type {
-                continue;
-            } else {
-                last_act_type = top_act_type;
-            }
+            // Then group by day
+            let by_day: Vec<Vec<Location>> = week.iter()
+                                            .group_by(|loc| loc.timestamp.num_days_from_ce())
+                                            .into_iter()
+                                            .map(|(_, d)| d.cloned().collect())
+                                            .collect();
             
-            match top_act_type {
-                ActivityType::UNKNOWN | ActivityType::STILL | ActivityType::TILTING => {continue}
-                _ => {
-                    // print the activity type, after casting to colored string
-                    let act_c : ColoredString = top_act_type.into();
-                    print!("{}", act_c);
+            // then group by day in the week, showing activities
+            for day in by_day.iter() {
+                print!("{:>10} ", day[0].timestamp.weekday().to_string());
+
+                let mut act_ll : Vec<Activities> = Vec::new();
+
+                for loc in day.iter() {
+                    act_ll.push(loc.merged_activities());
                 }
+
+                let mut last_act : Option<Activity> = None;
+                let mut last_act_type : ActivityType = ActivityType::UNKNOWN;
+
+                for acts in act_ll {
+                    let top_act_type = acts.top_activity_type();
+
+                    // if the activity type has not changed, ignore
+                    if top_act_type == last_act_type {
+                        continue;
+                    } else {
+                        last_act_type = top_act_type;
+                    }
+                    
+                    match top_act_type {
+                        ActivityType::UNKNOWN | ActivityType::STILL | ActivityType::TILTING => {continue}
+                        _ => {
+                            // print the activity type, after casting to colored string
+                            let act_c : ColoredString = top_act_type.into();
+                            print!("{}", act_c);
+                        }
+                    }
+                }
+
+                println!();
+                // END DAY LOOP
             }
+
+            // END WEEK LOOP
         }
+
+        println!();
+        // END MONTH LOOP
     }
 
     println!();
@@ -239,7 +271,7 @@ fn main() -> Result<()> {
     let mut len_before = filtered_locations.len();
     filtered_locations = filtered_locations.filter_outliers();
     let delta: i64 = (len_before - filtered_locations.len()) as i64;
-    info!("Removed {} outliers by velocity", delta);
+    debug!("Removed {} outliers by velocity", delta);
 
     if let Some(ref center_point_radius) = args.center_point_radius {
         let lat = center_point_radius[0];
@@ -251,12 +283,24 @@ fn main() -> Result<()> {
     }
 
     // print the list of activities
-    info!("Activities:");
+    println!("{:^32}","LEGEND".black().bold().on_white());
     let activity_list = filtered_locations.list_activities();
 
-    for activity in activity_list {
-        info!(" - {}", activity);
+    // find the longest activity name
+    let name_pad = max(activity_list.clone().into_iter().map(|a| a.len()).collect::<Vec<_>>()).unwrap_or(16);
+    
+    // two columns
+    for (row,chunk) in activity_list.chunks(2).enumerate() {
+        for (col, activity) in chunk.iter().enumerate() {
+            let act : ActivityType = activity.clone().into();
+            let act_c : ColoredString = act.clone().into();
+            let pad = col*2;
+            print!("{:>pad$} {} {:<name_pad$} ","", act_c, activity);
+        }
+        println!();
     }
+
+    println!();
 
     len_before = filtered_locations.len();
 
@@ -275,38 +319,38 @@ fn main() -> Result<()> {
     //     info!("\n{}", loc);
     // }
 
-    if args.rerun {
-        // group lines by day
-        let line_groups: Vec<Vec<Location>> = filtered_locations
-            .iter()
-            .group_by(|loc| loc.timestamp.timestamp() / 3600)
-            .into_iter()
-            .map(|(_, g)| g.cloned().collect())
-            .collect();
+    //if args.rerun {
+    //    // group lines by day
+    //    let line_groups: Vec<Vec<Location>> = filtered_locations
+    //        .iter()
+    //        .group_by(|loc| loc.timestamp.timestamp() / 3600)
+    //        .into_iter()
+    //        .map(|(_, g)| g.cloned().collect())
+    //        .collect();
 
-        // plot with rerun!
-        let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").spawn()?;
+    //    // plot with rerun!
+    //    let rec = rerun::RecordingStreamBuilder::new("rerun_example_app").spawn()?;
 
-        for group in line_groups {
-            let time = group[0].timestamp.timestamp() as f64;
+    //    for group in line_groups {
+    //        let time = group[0].timestamp.timestamp() as f64;
 
-            // vec of x,y,z (lat long  altitude)
-            let coords: Vec<(f64, f64, f64)> = group
-                .iter()
-                .map(|loc| convert_to_xyz(loc, &args.center_point_radius))
-                .collect();
-            let coords_pts: Vec<(f32, f32)> = coords
-                .iter()
-                .map(|(x, y, _)| (*x as f32, *y as f32))
-                .collect();
+    //        // vec of x,y,z (lat long  altitude)
+    //        let coords: Vec<(f64, f64, f64)> = group
+    //            .iter()
+    //            .map(|loc| convert_to_xyz(loc, &args.center_point_radius))
+    //            .collect();
+    //        let coords_pts: Vec<(f32, f32)> = coords
+    //            .iter()
+    //            .map(|(x, y, _)| (*x as f32, *y as f32))
+    //            .collect();
 
-            // make a rerun LineStrips3D object
-            let linestrip = rerun::LineStrips2D::new(vec![coords_pts]);
+    //        // make a rerun LineStrips3D object
+    //        let linestrip = rerun::LineStrips2D::new(vec![coords_pts]);
 
-            rec.set_time_seconds("time", time);
-            rec.log("position", &linestrip).unwrap();
-        }
-    }
+    //        rec.set_time_seconds("time", time);
+    //        rec.log("position", &linestrip).unwrap();
+    //    }
+    //}
 
     // wait for the reader to finish
     reader_jh.join().unwrap();

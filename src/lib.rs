@@ -521,6 +521,13 @@ impl std::fmt::Display for Location {
     }
 }
 
+impl From<String> for ActivityType {
+    fn from(value : String) -> ActivityType {
+        let a : Activity = Activity { activity_type : value, confidence : 0 };
+        a.into()
+    }
+}
+
 impl Into<ActivityType> for Activity {
     fn into(self) -> ActivityType {
         match self.activity_type.as_str() {
