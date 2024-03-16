@@ -14,6 +14,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::cmp::max;
 use struson::json_path;
 use struson::reader::{JsonReader, JsonStreamReader};
 
@@ -26,6 +27,8 @@ use geo::{Coord, HaversineDistance, Point};
 
 /// group of locations
 pub type Locations = Vec<Location>;
+
+pub type SampledActivities = HashMap<ActivityType, Vec<i32>>;
 
 /// methods used for locations
 pub trait LocationsExt {
@@ -409,17 +412,37 @@ impl Into<HashMap<ActivityType, i32>> for &Activities {
     fn into(self) -> HashMap<ActivityType, i32> {
         let mut result: HashMap<ActivityType, i32> = HashMap::new();
 
+        // first, convert into a SampledActivities hashmap.
+        // then, average the confidence vectors to their mean value.
+        let mut sampled : SampledActivities = self.into(); 
+        
+        for key in sampled.keys() {
+            let v = sampled.get(key).unwrap();
+            let vsum : i32 = v.clone().into_iter().sum();
+            result.insert(*key, vsum / (v.len() as i32));
+        }
+
+        result
+    }
+}
+
+// List of activities into a hash map of all confidence samples
+impl Into<SampledActivities> for &Activities {
+    fn into(self) -> SampledActivities {
+        let mut result: HashMap<ActivityType, Vec<i32>> = HashMap::new();
+
         for act in self.activities.iter() {
             let act_type: ActivityType = act.clone().into();
             let act_confidence: i32 = act.confidence.clone();
 
             // if we already have this activity type, add the confidence to it
             if result.contains_key(&act_type) {
-                let current_confidence = result.get(&act_type).unwrap();
-                result.insert(act_type, current_confidence + act_confidence);
+                let mut current_confidence_samples : Vec<i32> = result.get(&act_type).unwrap().clone();
+                current_confidence_samples.push(act_confidence);
+                result.insert(act_type, current_confidence_samples);
             } else {
                 // otherwise, add it to the hashmap
-                result.insert(act_type, act_confidence);
+                result.insert(act_type, vec![act_confidence]);
             }
         }
 

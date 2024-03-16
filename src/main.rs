@@ -1,8 +1,8 @@
 #![feature(linked_list_cursors)]
 
 use anyhow::Result;
-use chrono::{DateTime, Local, NaiveDate, TimeZone, Datelike};
-use itertools::{Itertools,max};
+use chrono::{Timelike, DateTime, Local, NaiveDate, TimeZone, Datelike};
+use itertools::{Itertools,max,min};
 
 use geo::{Coord, Point};
 const MEAN_EARTH_RADIUS: f64 = 6371008.8;
@@ -152,12 +152,12 @@ fn main() -> Result<()> {
 
         // check if the location is within the date range
         if let Some(start_date) = start_date {
-            if loc.timestamp.date_naive() < start_date.date_naive() {
+            if loc.timestamp.naive_local() < start_date.naive_local() {
                 continue;
             }
         }
         if let Some(end_date) = end_date {
-            if loc.timestamp.date_naive() >= end_date.date_naive() {
+            if loc.timestamp.naive_local() >= end_date.naive_local() {
                 continue;
             }
         }
@@ -182,87 +182,8 @@ fn main() -> Result<()> {
 
     println!();
 
-    // iterate over locations, and print a letter for each one,
-    // representing the highest-confidence activity type
-    let bubble_window : i64 = 60 * args.activity_window.unwrap_or(30);
 
-    // group the entries by month 
-    let grouped: Vec<Vec<Location>> = locations
-        .iter()
-        .group_by(|loc| loc.timestamp.date_naive().month())
-        .into_iter()
-        .map(|(_, g)| g.cloned().collect())
-        .collect();
-    
 
-    // GROUP BY MONTH, THEN WEEK, THEN DAY!
-    for g in grouped.iter() {
-        // print the month
-        println!("\n{}",format!("{:<4} {}", g[0].timestamp.format("%Y").to_string(), g[0].timestamp.format("%B").to_string().bold()).black().on_white());
-
-        let by_week : Vec<Vec<Location>> = g.iter()
-                                            .group_by(|loc| loc.timestamp.date_naive().iso_week())
-                                            .into_iter()
-                                            .map(|(_, g)| g.cloned().collect())
-                                            .collect();
-
-        
-        for week in by_week.iter() {
-            // For each week in this month, print the week number
-            println!("{:>6} {}","W",format!("{:<02}",week[0].timestamp.iso_week().week()).bold());
-
-            // Then group by day
-            let by_day: Vec<Vec<Location>> = week.iter()
-                                            .group_by(|loc| loc.timestamp.num_days_from_ce())
-                                            .into_iter()
-                                            .map(|(_, d)| d.cloned().collect())
-                                            .collect();
-            
-            // then group by day in the week, showing activities
-            for day in by_day.iter() {
-                print!("{:>10} ", day[0].timestamp.weekday().to_string());
-
-                let mut act_ll : Vec<Activities> = Vec::new();
-
-                for loc in day.iter() {
-                    act_ll.push(loc.merged_activities());
-                }
-
-                let mut last_act : Option<Activity> = None;
-                let mut last_act_type : ActivityType = ActivityType::UNKNOWN;
-
-                for acts in act_ll {
-                    let top_act_type = acts.top_activity_type();
-
-                    // if the activity type has not changed, ignore
-                    if top_act_type == last_act_type {
-                        continue;
-                    } else {
-                        last_act_type = top_act_type;
-                    }
-                    
-                    match top_act_type {
-                        ActivityType::UNKNOWN | ActivityType::STILL | ActivityType::TILTING => {continue}
-                        _ => {
-                            // print the activity type, after casting to colored string
-                            let act_c : ColoredString = top_act_type.into();
-                            print!("{}", act_c);
-                        }
-                    }
-                }
-
-                println!();
-                // END DAY LOOP
-            }
-
-            // END WEEK LOOP
-        }
-
-        println!();
-        // END MONTH LOOP
-    }
-
-    println!();
 
     // remove high-velocity outliers
     let mut filtered_locations = locations.clone();
@@ -281,6 +202,143 @@ fn main() -> Result<()> {
         let origin: Point<f64> = Point::new(lat, long);
         filtered_locations = filtered_locations.filter_by_distance(origin, radius);
     }
+
+
+    // REMOVE ACTIVITY TYPES
+    len_before = filtered_locations.len();
+
+    // filter by activity, start and end date
+    if let Some(activity_type) = args.activity_type {
+        filtered_locations = filtered_locations.filter_by_activity(activity_type.into());
+        // store length after filtering
+        info!(
+            "Removed {} locations by activity type",
+            len_before - filtered_locations.len()
+        );
+    }
+
+
+    // group the entries by month 
+    let grouped: Vec<Vec<Location>> = filtered_locations
+        .iter()
+        .group_by(|loc| loc.timestamp.naive_local().month())
+        .into_iter()
+        .map(|(_, g)| g.cloned().collect())
+        .collect();
+
+    // GROUP BY MONTH, THEN WEEK, THEN DAY!
+    for g in grouped.iter() {
+        // print the month
+        println!("\n{}",format!("{:<4} {:>9}", g[0].timestamp.format("%Y").to_string(), g[0].timestamp.format("%B").to_string().bold()).bright_white());
+
+        let by_week : Vec<Vec<Location>> = g.iter()
+                                            .group_by(|loc| loc.timestamp.naive_local().iso_week())
+                                            .into_iter()
+                                            .map(|(_, g)| g.cloned().collect())
+                                            .collect();
+
+        
+        for week in by_week.iter() {
+            // For each week in this month, print the week number
+            //println!("{} {}","WEEK ",format!("{:<02}",week[0].timestamp.iso_week().week()).bold());
+            println!(); // week separator line
+
+            // Then group by day
+            let by_day: Vec<Vec<Location>> = week.iter()
+                                            .group_by(|loc| loc.timestamp.naive_local().num_days_from_ce())
+                                            .into_iter()
+                                            .map(|(_, d)| d.cloned().collect())
+                                            .collect();
+            
+            // then group by day in the week, showing activities
+            for day in by_day.iter() {
+                let is_weekend = (day[0].timestamp.weekday() == chrono::Weekday::Sat) || (day[0].timestamp.naive_local().weekday() == chrono::Weekday::Sun);
+
+                if !is_weekend{
+                    print!("{:>06} {:>6} ", format!("{:02}", day[0].timestamp.day()), day[0].timestamp.naive_local().weekday().to_string());
+                } else {
+                    // weekends are highlighted!
+                    print!("{:>06} {:>6} ", format!("{:02}", day[0].timestamp.day()), day[0].timestamp.naive_local().weekday().to_string().white().on_purple());
+                }
+
+                // FINALLY, group by the hour!
+                let by_hour: Vec<(u32,Vec<Location>)> = day.iter()
+                                                    .group_by(|loc| loc.timestamp.hour())
+                                                    .into_iter()
+                                                    .map(|(g, d)| (g, d.cloned().collect()))
+                                                    .collect();
+                
+                // print the hours on top
+                print!("{:>6}","");
+
+                // additional padding if the group of hours doesnt cover the full 24 hour day
+                let time_pad = (min(by_hour.clone().into_iter().map(|(_,a)| a[0].timestamp.hour()).collect::<Vec<_>>()).unwrap_or(0) * 2) as usize;
+                print!("{:>time_pad$}","");
+
+                for (i,hour) in by_hour.clone().iter() {
+                    if i % 4 == 0 {
+                        print!("{}",format!("{:>02}",hour[0].timestamp.hour()).dimmed());
+                    } else {
+                        print!("{:>2}","");
+                    }
+                }
+
+                println!();
+                print!("{:>20}","");
+
+                // additional padding if the group of hours doesnt cover the full 24 hour day
+                print!("{:>time_pad$}","");
+
+
+                for (i,hour) in by_hour.iter() {
+                    // get the top activity type for this hour!
+                    let mut acts : Activities = hour[0].clone().merged_activities();
+
+                    for loc in hour.iter().skip(1) {
+                        // insert more activities into the first one, making a mega one.
+                        acts.activities.append(&mut loc.merged_activities().clone().activities);
+                    }
+
+
+                    //let top_activities : Vec<ActivityType> = acts.top_activities().into_iter().map(|a| a.into()).collect::<Vec<ActivityType>>();
+                    let top_activities = acts.top_activities();
+
+                    // if 'EXITING_VEHICLE' in top activities, prioritise that!
+                    //if top_activities.clone().contains(&ActivityType::EXITING_VEHICLE) {
+                    //    // print the activity type, after casting to colored string
+                    //    let act_c : ColoredString = ActivityType::EXITING_VEHICLE.into();
+                    //    print!(" {}", act_c);
+                    //    continue;
+                    //}
+
+                    for top_act_type in top_activities {
+                        let act : ActivityType = top_act_type.clone().into();
+
+                        match act {
+                            //ActivityType::UNKNOWN | ActivityType::TILTING | ActivityType::STILL => {continue},
+                            _ => {
+                                // print the activity type, after casting to colored string
+                                let act_c : ColoredString = act.clone().into();
+                                print!(" {}", act_c);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                println!();
+                // END DAY LOOP
+            }
+
+            // END WEEK LOOP
+        }
+
+        println!();
+        // END MONTH LOOP
+    }
+
+    println!();
+
 
     // print the list of activities
     println!("{:^32}","LEGEND".black().bold().on_white());
@@ -302,17 +360,6 @@ fn main() -> Result<()> {
 
     println!();
 
-    len_before = filtered_locations.len();
-
-    // filter by activity, start and end date
-    if let Some(activity_type) = args.activity_type {
-        filtered_locations = filtered_locations.filter_by_activity(activity_type.into());
-        // store length after filtering
-        info!(
-            "Removed {} locations by activity type",
-            len_before - filtered_locations.len()
-        );
-    }
 
     // // print some locations
     // for loc in filtered_locations.iter().take(1) {
